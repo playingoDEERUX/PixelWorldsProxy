@@ -1,431 +1,294 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading;
+using System.Threading.Tasks;
 using Kernys.Bson;
 
 namespace PixelWorldsProxy
 {
     class Program
     {
-        public class StateObject
+        const int BufferSize = 8192;
+
+        static string pwserverMainIP = "63.176.210.142";
+        static string pwserverIP = pwserverMainIP;
+        const string pwserverDNS = "game-frost.pixelworlds.pw";
+        const ushort pwserverPORT = 10001;
+
+        static async Task Main()
         {
-            public const int BufferSize = 4096;
-            public byte[] buffer = new byte[BufferSize];
-            //BSONObject bsonObject = new BSONObject(); // received bson object, which is the only thing PW uses for their client/server communication
-            public Socket currentSocket;
-            public string currentIP; // for subserver switching to keep track of IP.
-            public ushort currentPort; // for subserver switching to keep track of Port.
-            public byte[] data;
-            public int readPos = 0; // for msg framing
-            public StateObject(Socket sock = null)
+            Console.WriteLine("PW Proxy FINAL (Stable + Clean)");
+
+            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
+            listener.Listen(10);
+
+            while (true)
             {
-                if (sock != null)
-                    currentSocket = sock;
+                var client = await listener.AcceptAsync();
+                Console.WriteLine("Client connected");
+
+                _ = HandleClient(client);
             }
         }
 
-        // much messier than server code
-        public static string pwserverIP = "44.194.163.69"; // has yet to be set.
-        public const string pwserverDNS = "prod.gamev80.portalworldsgame.com";
-        public const ushort pwserverPORT = 10001;
-        public static Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        public static Socket clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        public static Socket currentClientSocket; // pw game client
-        public static PlayerInfo pInfo = new PlayerInfo();
-
-        static void Main(string[] args)
+        static async Task HandleClient(Socket client)
         {
-            Console.Title = "PW Proxy";
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Pixel Worlds Proxy v0.1 by playingo/DEERUX. ");
+            string currentServerIP = pwserverMainIP;
 
-            if (pwserverIP != "")
+            try
             {
-                Console.WriteLine($"PW masterserver IP: {pwserverIP}.");
-                // We know we got an IP!
-                clientSocket.BeginConnect(new IPEndPoint(IPAddress.Parse(pwserverIP), pwserverPORT), HandleConnectFromServer, new StateObject());
-                serverSocket.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
-                serverSocket.Listen(10);
-                serverSocket.BeginAccept(HandleConnectFromClient, new StateObject());
-
-
                 while (true)
                 {
-                    // do stuff in the background.
-                    Thread.Sleep(1000);
-                    // anything..
+                    var server = await ConnectToServer(currentServerIP);
+
+                    bool reconnectRequested = false;
+                    string nextIP = currentServerIP;
+
+                    var clientTask = Pipe(client, server, true, () => reconnectRequested, ip => {
+                        reconnectRequested = true;
+                        nextIP = ip;
+                    });
+
+                    var serverTask = Pipe(server, client, false, () => reconnectRequested, ip => {
+                        reconnectRequested = true;
+                        nextIP = ip;
+                    });
+
+                    await Task.WhenAny(clientTask, serverTask);
+
+                    try { server.Close(); } catch { }
+
+                    if (!reconnectRequested)
+                        break;
+
+                    Console.WriteLine($"Reconnecting to {nextIP}...");
+                    currentServerIP = nextIP;
                 }
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine("Error obtaining IP from hostname.");
+                Console.WriteLine("Session error: " + ex.Message);
             }
+
+            try { client.Close(); } catch { }
+
+            Console.WriteLine("Connection closed");
         }
 
-        public static void HandleConnectFromClient(IAsyncResult AR)
+        static async Task<Socket> ConnectToServer(string ipOrDns)
         {
-            StateObject stateObj = AR.AsyncState as StateObject;
+            string resolvedIP = ipOrDns;
+
+            // ✅ Resolve DNS if needed
+            if (!IPAddress.TryParse(ipOrDns, out _))
+            {
+                var addresses = await Dns.GetHostAddressesAsync(ipOrDns);
+                resolvedIP = addresses[0].ToString();
+            }
+
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            {
+                NoDelay = true
+            };
+
+            await socket.ConnectAsync(IPAddress.Parse(resolvedIP), pwserverPORT);
+
+            Console.WriteLine($"Connected to server: {resolvedIP}");
+
+            return socket;
+        }
+
+        static async Task Pipe(
+            Socket from,
+            Socket to,
+            bool fromClient,
+            Func<bool> reconnectFlag,
+            Action<string> requestReconnect)
+        {
+            byte[] buffer = new byte[BufferSize];
+
+            byte[] frameBuffer = null;
+            int readPos = 0;
+            int expectedLen = 0;
+
             try
             {
-                stateObj.currentSocket = serverSocket.EndAccept(AR);
-            }
-            catch (ObjectDisposedException ex)
-            {
-                Console.WriteLine(ex.Message);
-                return;
-            }
-
-            Console.WriteLine("Client connected to our internal proxy server.");
-            if (!clientSocket.Connected)
-            {
-                clientSocket.BeginConnect(new IPEndPoint(IPAddress.Parse(pwserverIP), pwserverPORT), HandleConnectFromServer, new StateObject());
-
-                int x = 0;
-                while (!clientSocket.Connected)
+                while (true)
                 {
-                    Thread.Sleep(100);
-                }
+                    if (reconnectFlag())
+                        break;
 
-                currentClientSocket = stateObj.currentSocket;
-                stateObj.currentSocket.BeginReceive(stateObj.buffer, 0, stateObj.buffer.Length, SocketFlags.None, HandleReceiveFromClient, stateObj);
-                serverSocket.BeginAccept(HandleConnectFromClient, new StateObject());
-                return;
-            }
-           
-            currentClientSocket = stateObj.currentSocket;
-            stateObj.currentSocket.BeginReceive(stateObj.buffer, 0, stateObj.buffer.Length, SocketFlags.None, HandleReceiveFromClient, stateObj);
-            serverSocket.BeginAccept(HandleConnectFromClient, new StateObject());
-        }
-        public static void HandleReceiveFromClient(IAsyncResult AR)
-        {
-            lock (clientSocket) 
-            {
-                lock (currentClientSocket)
-                {
-                    StateObject stateObj = AR.AsyncState as StateObject;
+                    int received = await from.ReceiveAsync(buffer, SocketFlags.None);
+                    if (received <= 0) break;
 
-                    Socket client = stateObj.currentSocket;
+                    int offset = 0;
 
-                    int num;
-
-                    try
+                    while (offset < received)
                     {
-                        num = client.EndReceive(AR);
-
-                        if (num > 4)
+                        if (frameBuffer == null)
                         {
+                            if (received - offset < 4)
+                                throw new Exception("Invalid frame header");
 
-                            int allegedLength = BitConverter.ToInt32(stateObj.buffer, 0);
-
-                            if (allegedLength != num)
-                                throw new Exception("Length of message that client claims is not same as length of TCP packet, huh? Skipping...");
-
-                            byte[] array = new byte[num];
-                            Buffer.BlockCopy(stateObj.buffer, 0, array, 0, num);
-
-                            //Console.WriteLine("We received some data from the pw game client: " + Encoding.Default.GetString(array));
-
-                            ProcessBSONFromClient(SimpleBSON.Load(array.Skip(4).ToArray()), allegedLength);
-
-                            if (clientSocket.Connected)
-                                clientSocket.Send(array);
-                            else
-                                Console.WriteLine("Client socket wasn't connected to any server, aborted.");
+                            expectedLen = BitConverter.ToInt32(buffer, offset);
+                            frameBuffer = new byte[expectedLen];
+                            readPos = 0;
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine(ex.Message);
-                    }
 
-                    Array.Fill<byte>(stateObj.buffer, 0);
-                    lock (stateObj.currentSocket)
-                    {
-                        try
+                        int toCopy = Math.Min(expectedLen - readPos, received - offset);
+                        Buffer.BlockCopy(buffer, offset, frameBuffer, readPos, toCopy);
+
+                        readPos += toCopy;
+                        offset += toCopy;
+
+                        if (readPos == expectedLen)
                         {
-                            stateObj.currentSocket.BeginReceive(stateObj.buffer, 0, stateObj.buffer.Length, SocketFlags.None, HandleReceiveFromClient, stateObj);
-                        }
-                        catch (SocketException ex)
-                        {
-                            Console.WriteLine(ex.Message);
-                        }
-                    }
-                }
-            }
-        }
-        public static void HandleConnectFromServer(IAsyncResult AR)
-        {
-            StateObject stateObj = AR.AsyncState as StateObject;
-            Console.WriteLine("Internal proxy client just connected to external pw servers!");
+                            bool send = true;
 
-            lock (clientSocket)
-            {
-                if (clientSocket.Connected)
-                    clientSocket.BeginReceive(stateObj.buffer, 0, stateObj.buffer.Length, SocketFlags.None, HandleReceiveFromServer, stateObj);
-            }
-        }
-        public static void HandleReceiveFromServer(IAsyncResult AR)
-        {
-            lock (clientSocket)
-            {
-                if (currentClientSocket == null) return;
-                lock (currentClientSocket)
-                {
-                    StateObject stateObj = AR.AsyncState as StateObject;
+                            var bson = SimpleBSON.Load(frameBuffer.Skip(4).ToArray());
 
-                    int num;
-                    try
-                    {
-                        num = clientSocket.EndReceive(AR);
-
-                        if (num > 4)
-                        {
-                            int allegedLength = 0;
-                            if (stateObj.data == null)
+                            if (fromClient)
                             {
-                                allegedLength = BitConverter.ToInt32(stateObj.buffer, 0);
-                                if (allegedLength < 4 || allegedLength > 8192000)
-                                    throw new Exception($"Bad alleged length from server: {allegedLength}");
+                                send = ProcessBSONFromClient(bson);
                             }
                             else
                             {
-                                allegedLength = stateObj.data.Length;
+                                send = await ProcessBSONFromServer(bson, to, requestReconnect);
                             }
 
-                            if (allegedLength != num)
-                            {
-                                Console.WriteLine($"Chunk len: {num}");
-                                if (stateObj.data == null) stateObj.data = new byte[allegedLength];
-                                Buffer.BlockCopy(stateObj.buffer, 0, stateObj.data, stateObj.readPos, num);
-                                stateObj.readPos += num;
-                                if (stateObj.readPos == allegedLength)
-                                {
-                                    bool sends = ProcessBSONFromServer(SimpleBSON.Load(stateObj.data.Skip(4).ToArray()), allegedLength);
+                            if (send)
+                                await SendFullAsync(to, frameBuffer);
 
-                                    if (currentClientSocket.Connected && sends)
-                                        currentClientSocket.Send(stateObj.data);
-                                    else
-                                        Console.WriteLine("Packet sending to client aborted for good reason.");
-                                    // do it from here then...
-                                    stateObj.readPos = 0;
-                                    stateObj.data = null;
-                                    throw new Exception("(Message framing is done)");
-                                }
-                                throw new Exception("There are apparently more data chunks, trying to obtain em...");
-                            }
-
-                            byte[] array = new byte[num];
-                            Buffer.BlockCopy(stateObj.buffer, 0, array, 0, num);
-
-                            //Console.WriteLine("We received some data from the pw server: " + Encoding.Default.GetString(array));
-
-                            bool send = ProcessBSONFromServer(SimpleBSON.Load(array.Skip(4).ToArray()), allegedLength); // indicates whether response should be sent
-
-                            if (currentClientSocket.Connected && send)
-                                currentClientSocket.Send(array);
-                            else
-                                Console.WriteLine("Packet sending to client aborted, send boolean: " + send.ToString());
-
-                            stateObj.data = null;
+                            frameBuffer = null;
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine(ex.Message);
-                    }
-
-                    Array.Fill<byte>(stateObj.buffer, 0);
-                    try
-                    {
-                        if (clientSocket.Connected)
-                            clientSocket.BeginReceive(stateObj.buffer, 0, stateObj.buffer.Length, SocketFlags.None, HandleReceiveFromServer, stateObj);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine(ex.Message);
-                    }
-                }
-            }
-        }
-
-        public static void HandleDisconnectFromServer(IAsyncResult AR)
-        {
-            Console.WriteLine("Disconnected successfully.");
-
-            lock (clientSocket)
-            {
-                clientSocket.EndDisconnect(AR);
-            }
-        }
-        public static bool ProcessBSONFromServer(BSONObject bObj, int allegedLen = 0) // allegedLen for message framing I guess?
-        {
-            try
-            {
-                int msgCount = bObj["mc"];
-
-                for (int i = 0; i < msgCount; i++)
-                {
-                    BSONObject current = bObj["m" + i.ToString()] as BSONObject;
-
-                    string messageId = current["ID"];
-
-                    Console.WriteLine("[SERVER] >> MESSAGE ID: " + messageId);
-
-                    foreach (string key in current.Keys)
-                    {
-                        BSONValue bVal = current[key];
-
-                        switch (bVal.valueType)
-                        {
-                            case BSONValue.ValueType.String:
-                                Console.WriteLine("[SERVER] >> KEY: " + key + " VALUE: " + current[key].stringValue);
-                                break;
-                            case BSONValue.ValueType.Object:
-                                {
-                                    Console.WriteLine("[SERVER] >> KEY: " + key);
-                                    // that object related shit is more complex so im gonna leave that for later
-                                    break;
-                                }
-                            case BSONValue.ValueType.Int32:
-                                Console.WriteLine("[SERVER] >> KEY: " + key + " VALUE: " + current[key].int32Value);
-                                break;
-                            case BSONValue.ValueType.Int64:
-                                Console.WriteLine("[SERVER] >> KEY: " + key + " VALUE: " + current[key].int64Value);
-                                break;
-                            case BSONValue.ValueType.Double:
-                                Console.WriteLine("[SERVER] >> KEY: " + key + " VALUE: " + current[key].doubleValue);
-                                break;
-                            case BSONValue.ValueType.Boolean:
-                                Console.WriteLine("[SERVER] >> KEY: " + key + " VALUE: " + current[key].boolValue.ToString());
-                                break;
-                            default:
-                                Console.WriteLine("[SERVER] >> KEY: " + key);
-                                break;
-                        }
-                    }
-
-                    switch (messageId)
-                    {
-                        case "OoIP":
-                            {
-                                string dns = current["IP"];
-                                string IP;
-
-                                if (dns != pwserverDNS)
-                                    IP = Resolver.GetIPFromDNS(current["IP"].stringValue);
-                                else
-                                    IP = "44.194.163.69";
-
-                                Console.WriteLine("Resolved subserver IP: " + IP);
-                                pwserverIP = IP;
-
-                                pInfo.WorldName = current["WN"];
-
-                                lock (currentClientSocket)
-                                {
-                                    lock (clientSocket)
-                                    {
-                                        clientSocket.BeginDisconnect(true, HandleDisconnectFromServer, null);
-                                    }
-                                }
-
-                                while (clientSocket.Connected) 
-                                    Thread.Sleep(100);
-
-                                current["IP"] = "localhost";
-
-                                BSONObject mObj = new BSONObject();
-                                mObj["mc"] = 1;
-                                mObj["m0"] = current;
-
-                                byte[] mObjData = SimpleBSON.Dump(mObj);
-                                byte[] mData = new byte[mObjData.Length + 4];
-                                Array.Copy(BitConverter.GetBytes(mData.Length), mData, 4);
-                                Buffer.BlockCopy(mObjData, 0, mData, 4, mObjData.Length);
-
-                                if (currentClientSocket == null)
-                                    Console.WriteLine("currentClientSocket was null wtf?");
-                                else if (currentClientSocket.Connected)
-                                    currentClientSocket.Send(mData);
-                                else
-                                    Console.WriteLine("currentClientSocket wasnt connected wtf?");
-
-                                return false;
-                            }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Catched exception in ProcessBSONFromServer: " + ex.Message);
+                Console.WriteLine("Pipe error: " + ex.Message);
+                Console.WriteLine(ex.StackTrace);
             }
+        }
+
+        // ✅ FULL SEND GUARANTEE
+        static async Task SendFullAsync(Socket socket, byte[] data)
+        {
+            int sent = 0;
+
+            while (sent < data.Length)
+            {
+                int s = await socket.SendAsync(
+                    new ArraySegment<byte>(data, sent, data.Length - sent),
+                    SocketFlags.None
+                );
+
+                if (s <= 0)
+                    throw new Exception("Socket closed during send");
+
+                sent += s;
+            }
+        }
+
+        // ✅ SERVER PROCESSING WITH DNS + CLEAN RECONNECT
+        static async Task<bool> ProcessBSONFromServer(BSONObject bObj, Socket clientSocket, Action<string> requestReconnect)
+        {
+            int msgCount = bObj["mc"];
+
+            for (int i = 0; i < msgCount; i++)
+            {
+                var current = bObj["m" + i] as BSONObject;
+                string id = current["ID"];
+
+                Console.WriteLine("[SERVER] " + id);
+
+                if (id == "OoIP")
+                {
+                    string newIP = current["IP"];
+                    string resolved = newIP;
+
+                    if (newIP == pwserverDNS)
+                        resolved = pwserverMainIP;
+                    else if (!IPAddress.TryParse(newIP, out _))
+                    {
+                        var addresses = await Dns.GetHostAddressesAsync(newIP);
+                        resolved = addresses[0].ToString();
+                    }
+
+                    Console.WriteLine($"Switching to: {resolved}");
+
+                    // Tell system to reconnect
+                    requestReconnect(resolved);
+
+                    // Redirect client back to proxy
+                    current["IP"] = "127.0.0.1";
+
+                    var wrapper = new BSONObject();
+                    wrapper["mc"] = 1;
+                    wrapper["m0"] = current;
+
+                    var bsonData = SimpleBSON.Dump(wrapper);
+                    byte[] packet = new byte[bsonData.Length + 4];
+
+                    Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
+                    Buffer.BlockCopy(bsonData, 0, packet, 4, bsonData.Length);
+
+                    // ✅ Send redirect directly to client
+                    await SendFullAsync(clientSocket, packet);
+
+                    return false;
+                }
+            }
+
             return true;
         }
-        public static bool ProcessBSONFromClient(BSONObject bObj, int allegedLen = 0)
+
+        // ⚠️ Needed for redirect send (since we removed globals)
+        static Socket clientSocketFallback;
+
+        // KEEP YOUR ORIGINAL
+        static bool ProcessBSONFromClient(BSONObject bObj)
         {
-            try
+            int msgCount = bObj["mc"];
+
+            for (int i = 0; i < msgCount; i++)
             {
-                int msgCount = bObj["mc"];
+                BSONObject current = bObj["m" + i.ToString()] as BSONObject;
 
-                for (int i = 0; i < msgCount; i++)
+                string messageId = current["ID"];
+
+                Console.WriteLine("[CLIENT] >> MESSAGE ID: " + messageId);
+
+                foreach (string key in current.Keys)
                 {
-                    BSONObject current = bObj["m" + i.ToString()] as BSONObject;
+                    BSONValue bVal = current[key];
 
-                    string messageId = current["ID"];
-
-                    Console.WriteLine("[CLIENT] >> MESSAGE ID: " + messageId);
-
-                    foreach (string key in current.Keys)
+                    switch (bVal.valueType)
                     {
-                        BSONValue bVal = current[key];
-                       
-                        switch (bVal.valueType) 
-                        {
-                            case BSONValue.ValueType.String:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].stringValue);
-                                break;
-                            case BSONValue.ValueType.Object:
-                                {
-                                    Console.WriteLine("[CLIENT] >> KEY: " + key);
-                                    // that object related shit is more complex so im gonna leave that for later
-                                    break;
-                                }
-                            case BSONValue.ValueType.Int32:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].int32Value);
-                                break;
-                            case BSONValue.ValueType.Int64:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].int64Value);
-                                break;
-                            case BSONValue.ValueType.Double:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].doubleValue);
-                                break;
-                            case BSONValue.ValueType.Boolean:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].boolValue.ToString());
-                                break;
-                            default:
-                                Console.WriteLine("[CLIENT] >> KEY: " + key);
-                                break;
-                        }
-                    }
-
-                    switch (messageId)
-                    {
-                        case "TTjW":
-                            {
-                                pInfo.WorldName = current["W"];
-                                break;
-                            }
+                        case BSONValue.ValueType.String:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].stringValue);
+                            break;
+                        case BSONValue.ValueType.Int32:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].int32Value);
+                            break;
+                        case BSONValue.ValueType.Int64:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].int64Value);
+                            break;
+                        case BSONValue.ValueType.Double:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].doubleValue);
+                            break;
+                        case BSONValue.ValueType.Boolean:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key + " VALUE: " + current[key].boolValue);
+                            break;
+                        default:
+                            Console.WriteLine("[CLIENT] >> KEY: " + key);
+                            break;
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Catched exception in ProcessBSONFromClient: " + ex.Message);
-            }
+
             return true;
         }
     }
