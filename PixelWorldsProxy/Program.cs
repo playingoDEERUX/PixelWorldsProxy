@@ -62,7 +62,7 @@ namespace PixelWorldsProxy
 
             var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { LingerState = new LingerOption(true, 2) };
             listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
-            listener.Listen(10);
+            listener.Listen(99);
 
             while (true)
             {
