@@ -50,11 +50,14 @@ namespace PixelWorldsProxy
             {
                 client.NoDelay = true;
 
-                while (true) // Keep reconnecting if OoIP requires
+                while (true)
                 {
                     var server = await Connect(currentIP);
                     var result = await RunSession(client, server, state);
                     server.Close();
+
+                    // Reset OoIPPending after session ends
+                    state.OoIPPending = false;
 
                     if (!result.reconnect)
                         break;
@@ -181,13 +184,6 @@ namespace PixelWorldsProxy
 
                 if (id == "OoIP")
                 {
-                    // Skip if already processing an OoIP reconnect
-                    if (state.OoIPPending)
-                    {
-                        Console.WriteLine("[OoIP] Reconnect already pending, ignoring duplicate.");
-                        continue;
-                    }
-
                     string serverIP = msg["IP"];
 
                     if (serverIP == pwserverDNS)
@@ -198,10 +194,10 @@ namespace PixelWorldsProxy
                         serverIP = ips[0].ToString();
                     }
 
-                    if (serverIP != state.LastTargetIP)
+                    // Only trigger reconnect if different AND no reconnect is already pending
+                    if (!state.OoIPPending && serverIP != state.LastTargetIP)
                     {
                         newTargetIP = serverIP;
-                        state.LastTargetIP = serverIP;
                         state.OoIPPending = true; // mark reconnect in progress
                         Console.WriteLine($"[OoIP] Will reconnect to {serverIP}");
                     }
