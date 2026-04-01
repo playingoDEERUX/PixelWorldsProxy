@@ -10,6 +10,47 @@ namespace PixelWorldsProxy
 {
     class Program
     {
+        static void LogBSONPacket(BSONValue value, int indent = 0)
+        {
+            string Indent() => new string(' ', indent * 2);
+
+            if (value is BSONObject obj)
+            {
+                Console.WriteLine(Indent() + "{");
+                foreach (var key in obj.Keys)
+                {
+                    Console.Write(Indent() + $"  \"{key}\": ");
+                    LogBSONPacket(obj[key], indent + 1);
+                }
+                Console.WriteLine(Indent() + "}");
+            }
+            else if (value is BSONArray arr)
+            {
+                Console.WriteLine(Indent() + "[");
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    LogBSONPacket(arr[i], indent + 1);
+                }
+                Console.WriteLine(Indent() + "]");
+            }
+            else
+            {
+                string output = value.valueType switch
+                {
+                    BSONValue.ValueType.String => $"\"{value.stringValue}\"",
+                    BSONValue.ValueType.Boolean => value.boolValue ? "true" : "false",
+                    BSONValue.ValueType.Int32 => value.int32Value.ToString(),
+                    BSONValue.ValueType.Int64 => value.int64Value.ToString(),
+                    BSONValue.ValueType.Double => value.doubleValue.ToString(),
+                    BSONValue.ValueType.Binary => $"<binary {value.binaryValue.Length} bytes>",
+                    BSONValue.ValueType.UTCDateTime => $"\"{value.dateTimeValue:O}\"",
+                    BSONValue.ValueType.None => "null",
+                    _ => $"\"{value.stringValue}\""
+                };
+                Console.WriteLine(Indent() + output + ",");
+            }
+        }
+
         const int BufferSize = 8192;
         const string pwserverMainIP = "63.176.210.142";
         const string pwserverDNS = "game-frost.pixelworlds.pw";
@@ -139,6 +180,13 @@ namespace PixelWorldsProxy
                                 if (state.OoIPSync != null)
                                     await state.OoIPSync.Task;
 
+                                var bson = SimpleBSON.Load(frame.Skip(4).ToArray());
+                                if (bson != null)
+                                {
+                                    if (bson["mc"] > 0)
+                                        LogBSONPacket(bson);
+                                }
+
                                 await SendFull(to, frame, cancellationToken);
                             }
 
@@ -167,7 +215,7 @@ namespace PixelWorldsProxy
             {
                 var msg = obj["m" + i] as BSONObject;
                 string id = msg["ID"];
-                Console.WriteLine("[SERVER] " + id);
+                //Console.WriteLine("[SERVER] " + id);
 
                 if (id == "OoIP")
                 {
