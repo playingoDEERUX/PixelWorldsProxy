@@ -60,7 +60,7 @@ namespace PixelWorldsProxy
         {
             Console.WriteLine("PW Proxy 1.0 - github.com/playingoDEERUX/PixelWorldsProxy");
 
-            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, LingerState = new LingerOption(true, 2) };
             listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
             listener.Listen(10);
 
@@ -91,17 +91,20 @@ namespace PixelWorldsProxy
             {
                 while (true)
                 {
-                    var server = await Connect(currentIP);
+                    var server = await ConnectWithRetries(currentIP);
                     var result = await RunSession(client, server, state);
-                    server.Close();
 
                     if (!result.reconnect)
                         break;
+
+                    server.Close();
 
                     // Sync: wait for the client to process OoIP before reconnecting
                     currentIP = result.nextIP;
                     state.OoIPSync = new TaskCompletionSource<bool>();
                     await state.OoIPSync.Task; // wait until client is ready
+
+                   
                 }
             }
             catch (Exception ex)
@@ -110,7 +113,9 @@ namespace PixelWorldsProxy
             }
             finally
             {
-                try { client.Close(); } catch { }
+                try { 
+                    client.Close();
+                } catch { }
                 Console.WriteLine("Client disconnected");
             }
         }
@@ -236,7 +241,7 @@ namespace PixelWorldsProxy
                         Console.WriteLine($"[OoIP] Will reconnect to {serverIP}");
                     }
 
-                    msg["IP"] = "127.0.0.1";
+                    msg["IP"] = pwserverDNS;
                     bOoIPModified = true;
 
                     var wrapper = new BSONObject();
@@ -259,21 +264,42 @@ namespace PixelWorldsProxy
             return (false, null, bOoIPModified);
         }
 
-        static async Task<Socket> Connect(string ip)
+        static async Task<Socket> Connect(string ip, int timeoutMs = 5000)
         {
             if (!IPAddress.TryParse(ip, out _))
+                ip = (await Dns.GetHostAddressesAsync(ip))[0].ToString();
+
+            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, LingerState = new LingerOption(true, 2) };
+
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
             {
-                var ips = await Dns.GetHostAddressesAsync(ip);
-                ip = ips[0].ToString();
+                await s.ConnectAsync(ip, pwserverPORT);
+                Console.WriteLine("Connected to " + ip);
+                return s;
             }
+            catch (OperationCanceledException)
+            {
+                s.Close();
+                throw new TimeoutException($"Connect to {ip}:{pwserverPORT} timed out.");
+            }
+        }
 
-            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            await s.ConnectAsync(ip, pwserverPORT);
-            Console.WriteLine("Connected to " + ip);
-
-            // Release client waiting for reconnect
-            s.NoDelay = true;
-            return s;
+        static async Task<Socket> ConnectWithRetries(string ip, int retries = 3, int delayMs = 1000)
+        {
+            for (int i = 0; i < retries; i++)
+            {
+                try
+                {
+                    return await Connect(ip, 5000);
+                }
+                catch (TimeoutException)
+                {
+                    Console.WriteLine($"Retry {i + 1}/{retries}...");
+                    if (i < retries - 1) await Task.Delay(delayMs);
+                }
+            }
+            throw new Exception($"Failed to connect to {ip} after {retries} attempts.");
         }
 
         static async Task SendFull(Socket s, byte[] data, CancellationToken cancellationToken)
