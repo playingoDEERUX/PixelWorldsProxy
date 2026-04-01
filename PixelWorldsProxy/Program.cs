@@ -19,7 +19,7 @@ namespace PixelWorldsProxy
         {
             Console.WriteLine("PW Proxy 1.0 - github.com/playingoDEERUX/PixelWorldsProxy");
 
-            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
             listener.Listen(10);
 
@@ -38,32 +38,29 @@ namespace PixelWorldsProxy
         class ClientState
         {
             public string LastTargetIP;
-            public bool OoIPPending; // Track ongoing OoIP to avoid duplicate reconnects
+            public TaskCompletionSource<bool> OoIPSync; // Ensures client waits until proxy reconnects
         }
 
         static async Task HandleClient(Socket client)
         {
             string currentIP = pwserverMainIP;
-            var state = new ClientState { LastTargetIP = pwserverMainIP, OoIPPending = false };
+            var state = new ClientState { LastTargetIP = pwserverMainIP, OoIPSync = null };
 
             try
             {
-                client.NoDelay = true;
-
                 while (true)
                 {
                     var server = await Connect(currentIP);
                     var result = await RunSession(client, server, state);
                     server.Close();
 
-                    // Reset OoIPPending after session ends
-                    state.OoIPPending = false;
-
                     if (!result.reconnect)
                         break;
 
-                    Console.WriteLine($"Reconnecting to {result.nextIP}");
+                    // Sync: wait for the client to process OoIP before reconnecting
                     currentIP = result.nextIP;
+                    state.OoIPSync = new TaskCompletionSource<bool>();
+                    await state.OoIPSync.Task; // wait until client is ready
                 }
             }
             catch (Exception ex)
@@ -85,8 +82,8 @@ namespace PixelWorldsProxy
             var serverTask = Forward(server, client, false, cts.Token, state);
 
             var finished = await Task.WhenAny(clientTask, serverTask);
-            cts.Cancel(); // Stop the other task cleanly
-            await Task.WhenAll(clientTask, serverTask); // Wait for full cleanup
+            cts.Cancel();
+            await Task.WhenAll(clientTask, serverTask);
 
             return finished == serverTask ? serverTask.Result : (false, null, false);
         }
@@ -106,25 +103,19 @@ namespace PixelWorldsProxy
                     if (len <= 0) break;
 
                     int offset = 0;
-
                     while (offset < len)
                     {
                         if (frame == null)
                         {
-                            if (len - offset < 4)
-                                break;
-
+                            if (len - offset < 4) break;
                             expected = BitConverter.ToInt32(buffer, offset);
-                            if (expected <= 0 || expected > 1024 * 1024)
-                                break;
-
+                            if (expected <= 0 || expected > 1024 * 1024) break;
                             frame = new byte[expected];
                             read = 0;
                         }
 
                         int copy = Math.Min(expected - read, len - offset);
                         Buffer.BlockCopy(buffer, offset, frame, read, copy);
-
                         read += copy;
                         offset += copy;
 
@@ -135,17 +126,19 @@ namespace PixelWorldsProxy
                                 var bson = SimpleBSON.Load(frame.Skip(4).ToArray());
                                 var result = await HandleServerPacket(bson, state, to, cancellationToken);
 
-                                // Always send modified packet
+                                // Forward original frame if OoIP wasn't modified
                                 if (!result.OoIPModified)
-                                {
                                     await SendFull(to, frame, cancellationToken);
-                                }
 
                                 if (result.reconnect)
                                     return result;
                             }
                             else
                             {
+                                // Wait if OoIP sync is active (pause client-to-server forwarding)
+                                if (state.OoIPSync != null)
+                                    await state.OoIPSync.Task;
+
                                 await SendFull(to, frame, cancellationToken);
                             }
 
@@ -154,14 +147,8 @@ namespace PixelWorldsProxy
                     }
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // Normal shutdown, do nothing
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.OperationAborted)
-            {
-                // Normal when socket is closed
-            }
+            catch (OperationCanceledException) { }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.OperationAborted) { }
             catch (Exception ex)
             {
                 Console.WriteLine($"Forward Exception: {ex.Message}");
@@ -194,11 +181,10 @@ namespace PixelWorldsProxy
                         serverIP = ips[0].ToString();
                     }
 
-                    // Only trigger reconnect if different AND no reconnect is already pending
-                    if (!state.OoIPPending && serverIP != state.LastTargetIP)
+                    if (serverIP != state.LastTargetIP)
                     {
                         newTargetIP = serverIP;
-                        state.OoIPPending = true; // mark reconnect in progress
+                        state.LastTargetIP = serverIP;
                         Console.WriteLine($"[OoIP] Will reconnect to {serverIP}");
                     }
 
@@ -212,17 +198,17 @@ namespace PixelWorldsProxy
 
                     var data = SimpleBSON.Dump(wrapper);
                     byte[] packet = new byte[data.Length + 4];
-
                     Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
                     Buffer.BlockCopy(data, 0, packet, 4, data.Length);
 
+                    // Send OoIP to client before reconnecting internally
                     await SendFull(client, packet, t);
 
                     return (newTargetIP != null, newTargetIP, bOoIPModified);
                 }
             }
 
-            return (newTargetIP != null, newTargetIP, bOoIPModified);
+            return (false, null, bOoIPModified);
         }
 
         static async Task<Socket> Connect(string ip)
@@ -233,9 +219,12 @@ namespace PixelWorldsProxy
                 ip = ips[0].ToString();
             }
 
-            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             await s.ConnectAsync(ip, pwserverPORT);
             Console.WriteLine("Connected to " + ip);
+
+            // Release client waiting for reconnect
+            s.NoDelay = true;
             return s;
         }
 
@@ -244,21 +233,9 @@ namespace PixelWorldsProxy
             int sent = 0;
             while (sent < data.Length)
             {
-                try
-                {
-                    int n = await s.SendAsync(new ArraySegment<byte>(data, sent, data.Length - sent), SocketFlags.None, cancellationToken);
-                    if (n == 0)
-                    {
-                        // Prevent tight loop
-                        await Task.Delay(1, cancellationToken);
-                        continue;
-                    }
-                    sent += n;
-                }
-                catch (SocketException ex)
-                {
-                    throw new Exception("Send failed: " + ex.Message, ex);
-                }
+                int n = await s.SendAsync(new ArraySegment<byte>(data, sent, data.Length - sent), SocketFlags.None, cancellationToken);
+                if (n == 0) await Task.Delay(1, cancellationToken);
+                sent += n;
             }
         }
     }
