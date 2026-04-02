@@ -155,7 +155,7 @@ namespace PixelWorldsProxy
                         {
                             if (len - offset < 4) break;
                             expected = BitConverter.ToInt32(buffer, offset);
-                            if (expected <= 0 || expected > 1024 * 1024) break;
+                            if (expected <= 0 || expected > (8 * 1024 * 1024)) break;
                             frame = new byte[expected];
                             read = 0;
                         }
