@@ -1,5 +1,6 @@
-using Kernys.Bson;
+﻿using Kernys.Bson;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -10,28 +11,46 @@ namespace PixelWorldsProxy
 {
     class Program
     {
-        static void LogBSONPacket(BSONValue value, int indent = 0)
+        public static BSONObject CreateChatMessage(string nickname, string userID, string channel, int channelIndex, string message)
+        {
+            BSONObject bObj = new BSONObject();
+            bObj[MsgLabels.ChatMessage.Nickname] = nickname;
+            bObj[MsgLabels.ChatMessage.UserID] = userID;
+            bObj[MsgLabels.ChatMessage.Channel] = channel;
+            bObj["channelIndex"] = channelIndex;
+            bObj[MsgLabels.ChatMessage.Message] = message;
+            bObj[MsgLabels.ChatMessage.ChatTime] = DateTime.UtcNow;
+            return bObj;
+        }
+        static void LogBSONPacket(BSONValue value, int indent = 0, ConsoleColor? color = null)
         {
             string Indent() => new string(' ', indent * 2);
 
+            // Save current color
+            var previousColor = Console.ForegroundColor;
+
+            // Apply new color if provided
+            if (color.HasValue)
+                Console.ForegroundColor = color.Value;
+
             if (value is BSONObject obj)
             {
-                Console.WriteLine(Indent() + "{");
+                AsyncLogger.Log(Indent() + "{");
                 foreach (var key in obj.Keys)
                 {
                     Console.Write(Indent() + $"  \"{key}\": ");
-                    LogBSONPacket(obj[key], indent + 1);
+                    LogBSONPacket(obj[key], indent + 1, color);
                 }
-                Console.WriteLine(Indent() + "}");
+                AsyncLogger.Log(Indent() + "}");
             }
             else if (value is BSONArray arr)
             {
-                Console.WriteLine(Indent() + "[");
+                AsyncLogger.Log(Indent() + "[");
                 for (int i = 0; i < arr.Count; i++)
                 {
-                    LogBSONPacket(arr[i], indent + 1);
+                    LogBSONPacket(arr[i], indent + 1, color);
                 }
-                Console.WriteLine(Indent() + "]");
+                AsyncLogger.Log(Indent() + "]");
             }
             else
             {
@@ -47,18 +66,23 @@ namespace PixelWorldsProxy
                     BSONValue.ValueType.None => "null",
                     _ => $"\"{value.stringValue}\""
                 };
-                Console.WriteLine(Indent() + output + ",");
+                AsyncLogger.Log(Indent() + output + ",");
             }
+
+            // Restore original color
+            if (color.HasValue)
+                Console.ForegroundColor = previousColor;
         }
 
-        const int BufferSize = 8192;
+        const int BufferSize = 1024;
         const string pwserverMainIP = "63.176.210.142";
         const string pwserverDNS = "game-frost.pixelworlds.pw";
         const ushort pwserverPORT = 10001;
 
         static async Task Main()
         {
-            Console.WriteLine("PW Proxy 1.0 - github.com/playingoDEERUX/PixelWorldsProxy");
+            AsyncLogger.Start();
+            AsyncLogger.Log("PW Proxy 1.0 - github.com/playingoDEERUX/PixelWorldsProxy");
 
             var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { LingerState = new LingerOption(true, 2) };
             listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
@@ -67,11 +91,11 @@ namespace PixelWorldsProxy
             while (true)
             {
                 var client = await listener.AcceptAsync();
-                Console.WriteLine("Client connected");
+                AsyncLogger.Log("Client connected");
                 _ = HandleClient(client).ContinueWith(t =>
                 {
                     if (t.Exception != null)
-                        Console.WriteLine("Client task failed: " + t.Exception);
+                        AsyncLogger.Log("Client task failed: " + t.Exception);
                 }, TaskContinuationOptions.OnlyOnFaulted);
             }
         }
@@ -80,6 +104,26 @@ namespace PixelWorldsProxy
         {
             public string LastTargetIP;
             public TaskCompletionSource<bool> OoIPSync; // Ensures client waits until proxy reconnects
+            public List<BSONObject> OutgoingInjectionList = new List<BSONObject>(); // For injecting outgoing packets upon next client send
+            public List<BSONObject> IncomingInjectionList = new List<BSONObject>(); // For injecting incoming packets upon next server send
+
+            public void InjectPacket(BSONObject obj, bool bToClient = false)
+            {
+                if (bToClient)
+                {
+                    lock (IncomingInjectionList)
+                    {
+                        IncomingInjectionList.Add(obj);
+                    }
+                }
+                else
+                {
+                    lock (OutgoingInjectionList)
+                    {
+                        OutgoingInjectionList.Add(obj);
+                    }
+                }
+            }
         }
 
         static async Task HandleClient(Socket client)
@@ -109,14 +153,14 @@ namespace PixelWorldsProxy
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Session error: " + ex.Message);
+                AsyncLogger.Log("Session error: " + ex.Message);
             }
             finally
             {
                 try { 
                     client.Close();
                 } catch { }
-                Console.WriteLine("Client disconnected");
+                AsyncLogger.Log("Client disconnected");
             }
         }
 
@@ -169,12 +213,41 @@ namespace PixelWorldsProxy
                         {
                             if (!fromClient)
                             {
+                                // got packet from server
                                 var bson = SimpleBSON.Load(frame.Skip(4).ToArray());
+                                int mc = 0;
+
+                                if (bson != null)
+                                {
+                                    mc = bson["mc"];
+
+                                    if (mc > 0)
+                                        LogBSONPacket(bson, 0, ConsoleColor.DarkRed);
+                                }
+
                                 var result = await HandleServerPacket(bson, state, to, cancellationToken);
 
-                                // Forward original frame if OoIP wasn't modified
-                                if (!result.OoIPModified)
+                                // If we have packets to inject, start from the message count and append the additional bson objects as necessary and sent a version of the modified frame instead.
+                                // Since PW is tick-based, this is pretty much reliable and should work consistently. There will always be a 'next tick' for as long as you're connected.
+                                if (state.IncomingInjectionList.Count > 0)
+                                {
+                                    bson["mc"] = mc + state.IncomingInjectionList.Count;
+                                    for (int i = 0; i < mc; i++)
+                                        bson["m" + i] = bson["m" + i];
+                                    for (int i = 0; i < state.IncomingInjectionList.Count; i++)
+                                        bson["m" + (mc + i)] = state.IncomingInjectionList[i];
+
+                                    var data = SimpleBSON.Dump(bson);
+                                    byte[] packet = new byte[data.Length + 4];
+                                    Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
+                                    Buffer.BlockCopy(data, 0, packet, 4, data.Length);
+                                    await SendFull(to, packet, cancellationToken);
+                                    state.IncomingInjectionList.Clear();
+                                }
+                                else if (!result.OoIPModified)
+                                {
                                     await SendFull(to, frame, cancellationToken);
+                                }
 
                                 if (result.reconnect)
                                     return result;
@@ -182,17 +255,43 @@ namespace PixelWorldsProxy
                             else
                             {
                                 // Wait if OoIP sync is active (pause client-to-server forwarding)
+                                // got packet from client
                                 if (state.OoIPSync != null)
                                     await state.OoIPSync.Task;
 
                                 var bson = SimpleBSON.Load(frame.Skip(4).ToArray());
+                                int mc = 0;
+
                                 if (bson != null)
                                 {
-                                    if (bson["mc"] > 0)
-                                        LogBSONPacket(bson);
+                                    mc = bson["mc"];
+
+                                    if (mc > 0)
+                                        LogBSONPacket(bson, 0, ConsoleColor.DarkGreen);
                                 }
 
-                                await SendFull(to, frame, cancellationToken);
+                                await HandleClientPacket(bson, state, to, cancellationToken);
+                                    
+                                // Now do same as above but for OutgoingInjectionList:
+
+                                if (state.OutgoingInjectionList.Count > 0)
+                                {
+                                    bson["mc"] = mc + state.OutgoingInjectionList.Count;
+                                    for (int i = 0; i < mc; i++)
+                                        bson["m" + i] = bson["m" + i];
+                                    for (int i = 0; i < state.OutgoingInjectionList.Count; i++)
+                                        bson["m" + (mc + i)] = state.OutgoingInjectionList[i];
+                                    var data = SimpleBSON.Dump(bson);
+                                    byte[] packet = new byte[data.Length + 4];
+                                    Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
+                                    Buffer.BlockCopy(data, 0, packet, 4, data.Length);
+                                    await SendFull(to, packet, cancellationToken);
+                                    state.OutgoingInjectionList.Clear();
+                                }
+                                else
+                                {
+                                    await SendFull(to, frame, cancellationToken);
+                                }
                             }
 
                             frame = null;
@@ -204,7 +303,7 @@ namespace PixelWorldsProxy
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.OperationAborted) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"Forward Exception: {ex.Message}");
+                AsyncLogger.Log($"Forward Exception: {ex.Message}");
             }
 
             return (false, null, false);
@@ -220,48 +319,116 @@ namespace PixelWorldsProxy
             {
                 var msg = obj["m" + i] as BSONObject;
                 string id = msg["ID"];
-                //Console.WriteLine("[SERVER] " + id);
-
-                if (id == "OoIP")
+                //AsyncLogger.Log("[SERVER] " + id);
+                switch (id)
                 {
-                    string serverIP = msg["IP"];
+                    case "OoIP":
+                        string serverIP = msg["IP"];
 
-                    if (serverIP == pwserverDNS)
-                        serverIP = pwserverMainIP;
-                    else if (!IPAddress.TryParse(serverIP, out _))
-                    {
-                        var ips = await Dns.GetHostAddressesAsync(serverIP);
-                        serverIP = ips[0].ToString();
-                    }
+                        if (serverIP == pwserverDNS)
+                            serverIP = pwserverMainIP;
+                        else if (!IPAddress.TryParse(serverIP, out _))
+                        {
+                            var ips = await Dns.GetHostAddressesAsync(serverIP);
+                            serverIP = ips[0].ToString();
+                        }
 
-                    if (serverIP != state.LastTargetIP)
-                    {
-                        newTargetIP = serverIP;
-                        state.LastTargetIP = serverIP;
-                        Console.WriteLine($"[OoIP] Will reconnect to {serverIP}");
-                    }
+                        if (serverIP != state.LastTargetIP)
+                        {
+                            newTargetIP = serverIP;
+                            state.LastTargetIP = serverIP;
+                            AsyncLogger.Log($"[OoIP] Will reconnect to {serverIP}");
+                        }
 
-                    msg["IP"] = pwserverDNS;
-                    bOoIPModified = true;
+                        msg["IP"] = pwserverDNS;
+                        bOoIPModified = true;
 
-                    var wrapper = new BSONObject();
-                    wrapper["mc"] = 2;
-                    wrapper["m0"] = msg;
-                    wrapper["m1"] = new BSONObject("p");
+                        var wrapper = new BSONObject();
+                        wrapper["mc"] = 2;
+                        wrapper["m0"] = msg;
+                        wrapper["m1"] = new BSONObject("p");
 
-                    var data = SimpleBSON.Dump(wrapper);
-                    byte[] packet = new byte[data.Length + 4];
-                    Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
-                    Buffer.BlockCopy(data, 0, packet, 4, data.Length);
+                        var data = SimpleBSON.Dump(wrapper);
+                        byte[] packet = new byte[data.Length + 4];
+                        Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
+                        Buffer.BlockCopy(data, 0, packet, 4, data.Length);
 
-                    // Send OoIP to client before reconnecting internally
-                    await SendFull(client, packet, t);
+                        await Task.Delay(50); // small delay to avoid flooding servers or client
 
-                    return (newTargetIP != null, newTargetIP, bOoIPModified);
+                        // Send OoIP to client before reconnecting internally
+                        await SendFull(client, packet, t);
+
+                        return (newTargetIP != null, newTargetIP, bOoIPModified);
+
+                    default:
+                        break;
                 }
             }
 
             return (false, null, bOoIPModified);
+        }
+
+        private static void HandleWorldChatMessage(BSONObject obj, ClientState state)
+        {
+            string chatMsg = obj["msg"];
+            string[] tokens = chatMsg.Split(" ");
+            int tokCount = tokens.Count();
+
+            if (tokCount <= 0)
+                return;
+
+            if (tokens[0] == "")
+                return;
+
+            if (tokens[0][0] == '/')
+            {
+                string res = "Unknown command.";
+                switch (tokens[0])
+                {
+                    case "/?":
+                    case "/help":
+                        res = "Commands >> /? /help";
+                        break;
+
+                    case "/testbuy":
+                        {
+                            res = "Test bought a small lock (you need 100 gems)!";
+                            BSONObject test = new BSONObject();
+                            test["ID"] = "BIPack";
+                            test["IPId"] = "SmallLock";
+                            state.InjectPacket(test);
+                            break;
+                        }
+                }
+
+                BSONObject gObj = new BSONObject(MsgLabels.Ident.BroadcastGlobalMessage);
+                gObj[MsgLabels.ChatMessageBinary] = CreateChatMessage($"<color=#00FAFA>{""}", "PWPROXY", "PWPROXY", 6, res);
+                state.InjectPacket(gObj, true);
+            }
+        }
+
+        static async Task HandleClientPacket(BSONObject obj, ClientState state, Socket client, CancellationToken t)
+        {
+            int mc = obj["mc"];
+
+
+            for (int i = 0; i < mc; i++)
+            {
+                var msg = obj["m" + i] as BSONObject;
+                string id = msg["ID"];
+
+                switch (id)
+                {
+                    case "WCM":
+                        {
+                            HandleWorldChatMessage(msg, state);
+                            break;
+                        }
+
+                    default:
+                        break;
+                }
+            }
         }
 
         static async Task<Socket> Connect(string ip, int timeoutMs = 5000)
@@ -275,7 +442,7 @@ namespace PixelWorldsProxy
             try
             {
                 await s.ConnectAsync(ip, pwserverPORT);
-                Console.WriteLine("Connected to " + ip);
+                AsyncLogger.Log("Connected to " + ip);
                 return s;
             }
             catch (OperationCanceledException)
@@ -295,7 +462,7 @@ namespace PixelWorldsProxy
                 }
                 catch (TimeoutException)
                 {
-                    Console.WriteLine($"Retry {i + 1}/{retries}...");
+                    AsyncLogger.Log($"Retry {i + 1}/{retries}...");
                     if (i < retries - 1) await Task.Delay(delayMs);
                 }
             }
