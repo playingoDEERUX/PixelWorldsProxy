@@ -5,6 +5,8 @@ Useful for capturing packets and hacking (if u know how to code).
 
 This project was started 2019 but not open src until now. 
 
+EDIT: Project has been updated in 2016 (wow, many many years later) and is WORKING with the latest Pixel Worlds Re-launch! (Tested 4th April 2026)
+
 # Add this to your hosts file
 127.0.0.1 game-frost.pixelworlds.pw
 
