@@ -1,4 +1,4 @@
-﻿using Kernys.Bson;
+using Kernys.Bson;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -387,7 +387,7 @@ namespace PixelWorldsProxy
                 {
                     case "/?":
                     case "/help":
-                        res = "Commands >> /? /help";
+                        res = "Commands >> /? /help /testbuy";
                         break;
 
                     case "/testbuy":
