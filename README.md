@@ -10,6 +10,7 @@ This project was started 2019 but not open src until now.
 
 # Notes
 Switching servers when receiving OoIP packet *sometimes* takes way longer than it should right now. I haven't had the time to look into it, but eventually you should get inside. If anyone is willing to share a fix, would be pleased to see a PR about it!
+
 Also in the console output, the RED text is what you receive from the server (server -> client). The GREEN text is what's being sent to the server (client -> server).
 
 ![Unbenannt](https://user-images.githubusercontent.com/62474734/147786243-661b8d42-5637-4880-957d-8d2d4d569b5d.PNG)
