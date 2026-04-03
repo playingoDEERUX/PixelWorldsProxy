@@ -13,4 +13,5 @@ Switching servers when receiving OoIP packet *sometimes* takes way longer than i
 
 Also in the console output, the RED text is what you receive from the server (server -> client). The GREEN text is what's being sent to the server (client -> server).
 
-![Unbenannt](https://user-images.githubusercontent.com/62474734/147786243-661b8d42-5637-4880-957d-8d2d4d569b5d.PNG)
+<img width="2521" height="1120" alt="image" src="https://github.com/user-attachments/assets/436f52f8-0b1f-4f85-a4c0-bfc7dc308bb6" />
+
