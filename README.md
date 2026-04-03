@@ -9,6 +9,6 @@ This project was started 2019 but not open src until now.
 127.0.0.1 game-frost.pixelworlds.pw
 
 # Notes
-Switching servers when receiving OoIP packet takes way longer than it should right now. I haven't had the time to look into it, but eventually you should get inside. If anyone is willing to share a fix, would be pleased to see a PR about it!
+Switching servers when receiving OoIP packet *sometimes* takes way longer than it should right now. I haven't had the time to look into it, but eventually you should get inside. If anyone is willing to share a fix, would be pleased to see a PR about it!
 
 ![Unbenannt](https://user-images.githubusercontent.com/62474734/147786243-661b8d42-5637-4880-957d-8d2d4d569b5d.PNG)
