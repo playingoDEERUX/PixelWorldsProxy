@@ -227,7 +227,7 @@ namespace PixelWorldsProxy
 
                                 var result = await HandleServerPacket(bson, state, to, cancellationToken);
 
-                                // If we have packets to inject, start from the message count and append the additional bson objects as necessary and sent a version of the modified frame instead.
+                                // If we have packets to inject, start from the message count and append the additional bson objects as necessary and send a version of the modified frame instead.
                                 // Since PW is tick-based, this is pretty much reliable and should work consistently. There will always be a 'next tick' for as long as you're connected.
                                 if (state.IncomingInjectionList.Count > 0)
                                 {
