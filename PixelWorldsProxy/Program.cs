@@ -76,6 +76,7 @@ namespace PixelWorldsProxy
 
         const int BufferSize = 1024;
         const string pwserverMainIP = "63.176.210.142";
+        static string pwserverLastIP = pwserverMainIP;
         const string pwserverDNS = "game-frost.pixelworlds.pw";
         const ushort pwserverPORT = 10001;
 
@@ -128,8 +129,8 @@ namespace PixelWorldsProxy
 
         static async Task HandleClient(Socket client)
         {
-            string currentIP = pwserverMainIP;
-            var state = new ClientState { LastTargetIP = pwserverMainIP, OoIPSync = null };
+            string currentIP = pwserverLastIP;
+            var state = new ClientState { LastTargetIP = currentIP, OoIPSync = null };
 
             try
             {
@@ -227,7 +228,7 @@ namespace PixelWorldsProxy
 
                                 var result = await HandleServerPacket(bson, state, to, cancellationToken);
 
-                                // If we have packets to inject, start from the message count and append the additional bson objects as necessary and send a version of the modified frame instead.
+                                // If we have packets to inject, start from the message count and append the additional bson objects as necessary and sent a version of the modified frame instead.
                                 // Since PW is tick-based, this is pretty much reliable and should work consistently. There will always be a 'next tick' for as long as you're connected.
                                 if (state.IncomingInjectionList.Count > 0)
                                 {
@@ -324,17 +325,11 @@ namespace PixelWorldsProxy
                 {
                     case "OoIP":
                         string serverIP = msg["IP"];
-
-                        if (serverIP == pwserverDNS)
-                            serverIP = pwserverMainIP;
-                        else if (!IPAddress.TryParse(serverIP, out _))
-                        {
-                            var ips = await Dns.GetHostAddressesAsync(serverIP);
-                            serverIP = ips[0].ToString();
-                        }
-
+                        
                         if (serverIP != state.LastTargetIP)
                         {
+                            serverIP = await ResolveAsync(serverIP);
+                            pwserverLastIP = serverIP; // we can do this because it turns out any PW endpoint/server will also handle logon for us or send us back to the main one to logon if necessary.
                             newTargetIP = serverIP;
                             state.LastTargetIP = serverIP;
                             AsyncLogger.Log($"[OoIP] Will reconnect to {serverIP}");
@@ -352,10 +347,7 @@ namespace PixelWorldsProxy
                         byte[] packet = new byte[data.Length + 4];
                         Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
                         Buffer.BlockCopy(data, 0, packet, 4, data.Length);
-
-                        await Task.Delay(50); // small delay to avoid flooding servers or client
-
-                        // Send OoIP to client before reconnecting internally
+                        // Send OoIP to client before reconnecting internall
                         await SendFull(client, packet, t);
 
                         return (newTargetIP != null, newTargetIP, bOoIPModified);
@@ -431,10 +423,31 @@ namespace PixelWorldsProxy
             }
         }
 
+        public static async Task<string?> ResolveAsync(string hostOrIp)
+        {
+    // If it's already an IP, just return it
+            if (IPAddress.TryParse(hostOrIp, out var parsed))
+                return parsed.ToString();
+
+            try
+            {
+                var addresses = await Dns.GetHostAddressesAsync(hostOrIp);
+
+                var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                    ?? addresses.FirstOrDefault();
+
+                return ip?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         static async Task<Socket> Connect(string ip, int timeoutMs = 5000)
         {
             if (!IPAddress.TryParse(ip, out _))
-                ip = (await Dns.GetHostAddressesAsync(ip))[0].ToString();
+                ip = await ResolveAsync(ip);
 
             var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { LingerState = new LingerOption(true, 2) };
 
@@ -475,7 +488,6 @@ namespace PixelWorldsProxy
             while (sent < data.Length)
             {
                 int n = await s.SendAsync(new ArraySegment<byte>(data, sent, data.Length - sent), SocketFlags.None, cancellationToken);
-                if (n == 0) await Task.Delay(1, cancellationToken);
                 sent += n;
             }
         }
