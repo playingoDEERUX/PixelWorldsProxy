@@ -11,6 +11,10 @@ namespace PixelWorldsProxy
 {
     class Program
     {
+        // for example:
+        //public static HashSet<string> msgListDoNotLog = new HashSet<string> { "p", "ST", "mP", "PSicU", "mp", "AIp", "AI" };
+        public static HashSet<string> msgListDoNotLog = new HashSet<string> {};
+
         public static BSONObject CreateChatMessage(string nickname, string userID, string channel, int channelIndex, string message)
         {
             BSONObject bObj = new BSONObject();
@@ -22,38 +26,73 @@ namespace PixelWorldsProxy
             bObj[MsgLabels.ChatMessage.ChatTime] = DateTime.UtcNow;
             return bObj;
         }
-        static void LogBSONPacket(BSONValue value, int indent = 0, ConsoleColor? color = null)
+
+        static void LogBSONPacket(BSONValue value, int indent = 0, ConsoleColor? color = null, HashSet<string>? ignoreIDs = null)
         {
             string Indent() => new string(' ', indent * 2);
 
-            // Save current color
-            var previousColor = Console.ForegroundColor;
-
-            // Apply new color if provided
-            if (color.HasValue)
-                Console.ForegroundColor = color.Value;
-
             if (value is BSONObject obj)
             {
+                // Count surviving keys after filtering
+                int survivingKeys = obj.Keys.Count(k =>
+                {
+                    if (ignoreIDs != null && k.StartsWith("m") && obj[k] is BSONObject subObj)
+                    {
+                        if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
+                            return false; // filtered out
+                    }
+                    return true; // keep
+                });
+
+                // Skip logging if less than 2 keys survive (usually only "mc" left)
+                if (survivingKeys < 2)
+                    return;
+
+                var previousColor = Console.ForegroundColor;
+                if (color.HasValue)
+                    Console.ForegroundColor = color.Value;
+
                 AsyncLogger.Log(Indent() + "{");
                 foreach (var key in obj.Keys)
                 {
+                    // Skip filtered "m<n>" entries
+                    if (ignoreIDs != null && key.StartsWith("m") && obj[key] is BSONObject subObj)
+                    {
+                        if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
+                            continue;
+                    }
+
                     Console.Write(Indent() + $"  \"{key}\": ");
-                    LogBSONPacket(obj[key], indent + 1, color);
+                    LogBSONPacket(obj[key], indent + 1, color, ignoreIDs);
                 }
                 AsyncLogger.Log(Indent() + "}");
+
+                if (color.HasValue)
+                    Console.ForegroundColor = previousColor;
             }
             else if (value is BSONArray arr)
             {
+                // Arrays are logged unconditionally
+                var previousColor = Console.ForegroundColor;
+                if (color.HasValue)
+                    Console.ForegroundColor = color.Value;
+
                 AsyncLogger.Log(Indent() + "[");
                 for (int i = 0; i < arr.Count; i++)
                 {
-                    LogBSONPacket(arr[i], indent + 1, color);
+                    LogBSONPacket(arr[i], indent + 1, color, ignoreIDs);
                 }
                 AsyncLogger.Log(Indent() + "]");
+
+                if (color.HasValue)
+                    Console.ForegroundColor = previousColor;
             }
             else
             {
+                var previousColor = Console.ForegroundColor;
+                if (color.HasValue)
+                    Console.ForegroundColor = color.Value;
+
                 string output = value.valueType switch
                 {
                     BSONValue.ValueType.String => $"\"{value.stringValue}\"",
@@ -67,11 +106,10 @@ namespace PixelWorldsProxy
                     _ => $"\"{value.stringValue}\""
                 };
                 AsyncLogger.Log(Indent() + output + ",");
-            }
 
-            // Restore original color
-            if (color.HasValue)
-                Console.ForegroundColor = previousColor;
+                if (color.HasValue)
+                    Console.ForegroundColor = previousColor;
+            }
         }
 
         const int BufferSize = 1024;
@@ -223,7 +261,7 @@ namespace PixelWorldsProxy
                                     mc = bson["mc"];
 
                                     if (mc > 0)
-                                        LogBSONPacket(bson, 0, ConsoleColor.DarkRed);
+                                        LogBSONPacket(bson, 0, ConsoleColor.DarkRed, msgListDoNotLog);
                                 }
 
                                 var result = await HandleServerPacket(bson, state, to, cancellationToken);
@@ -268,7 +306,7 @@ namespace PixelWorldsProxy
                                     mc = bson["mc"];
 
                                     if (mc > 0)
-                                        LogBSONPacket(bson, 0, ConsoleColor.DarkGreen);
+                                        LogBSONPacket(bson, 0, ConsoleColor.DarkGreen, msgListDoNotLog);
                                 }
 
                                 await HandleClientPacket(bson, state, to, cancellationToken);
