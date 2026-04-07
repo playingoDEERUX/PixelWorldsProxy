@@ -123,7 +123,7 @@ namespace PixelWorldsProxy
             AsyncLogger.Start();
             AsyncLogger.Log("PW Proxy 1.0 - github.com/playingoDEERUX/PixelWorldsProxy");
 
-            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { LingerState = new LingerOption(true, 2) };
+            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, LingerState = new LingerOption(true, 2) };
             listener.Bind(new IPEndPoint(IPAddress.Any, pwserverPORT));
             listener.Listen(99);
 
@@ -429,6 +429,9 @@ namespace PixelWorldsProxy
                             state.InjectPacket(test);
                             break;
                         }
+
+                    default:
+                        break;
                 }
 
                 BSONObject gObj = new BSONObject(MsgLabels.Ident.BroadcastGlobalMessage);
@@ -487,7 +490,7 @@ namespace PixelWorldsProxy
             if (!IPAddress.TryParse(ip, out _))
                 ip = await ResolveAsync(ip);
 
-            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { LingerState = new LingerOption(true, 2) };
+            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, LingerState = new LingerOption(true, 2) };
 
             using var cts = new CancellationTokenSource(timeoutMs);
             try
