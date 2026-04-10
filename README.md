@@ -17,7 +17,7 @@ This proxy has the ability to inject/send packets in both directions (to client 
 
 Lastly, if you want to know to parse/load certain things such as world data or other packets, you can check https://github.com/playingoDEERUX/PixelWorldsServer2, the game's protocol has remained the same.
 
-This project targets **.NET 8** and should be able to be compiled and run under Windows, MacOS, and Linux. (dotnet build / dotnet run)
+This project targets **.NET 8** and should be able to be compiled and run under Windows, MacOS, and Linux. (dotnet build / dotnet run or even dotnet watch run if you want automatic hot reloading.)
 
 <img width="2521" height="1120" alt="image" src="https://github.com/user-attachments/assets/436f52f8-0b1f-4f85-a4c0-bfc7dc308bb6" />
 
