@@ -113,9 +113,9 @@ namespace PixelWorldsProxy
         }
 
         const int BufferSize = 1024;
-        const string pwserverMainIP = "63.176.210.142";
+        const string pwserverMainIP = "63.183.104.49";
         static string pwserverLastIP = pwserverMainIP;
-        const string pwserverDNS = "game-frost.pixelworlds.pw";
+        const string pwserverDNS = "game-lava.pixelworlds.pw";
         const ushort pwserverPORT = 10001;
 
         static async Task Main()
