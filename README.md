@@ -6,7 +6,8 @@ Useful for capturing packets and hacking (if u know how to code).
 This project was started 2019 but not open src until now. 
 
 EDIT: Project has been updated in 2026 (wow, many many years later) and is **WORKING** with the latest Pixel Worlds Re-launch! (Tested 3rd April 2026)
-EDIT 2: Sometimes PW developers change their DNS, then you will have to update your hosts file, see below for latest DNS.
+
+**NOTE:** Sometimes PW developers change their DNS, then you will have to update your hosts file, see below for latest DNS.
 
 # Add this to your hosts file
 127.0.0.1 game-lava.pixelworlds.pw
