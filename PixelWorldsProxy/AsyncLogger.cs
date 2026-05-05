@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Threading;
@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 static class AsyncLogger
 {
-    private static readonly ConcurrentQueue<string> _queue = new ConcurrentQueue<string>();
+    private static ConcurrentQueue<(string, ConsoleColor?)> _queue = new ConcurrentQueue<(string, ConsoleColor?)>();
     private static readonly AutoResetEvent _signal = new AutoResetEvent(false);
     private static volatile bool _running = true;
 
@@ -21,9 +21,12 @@ static class AsyncLogger
         _signal.Set();
     }
 
-    public static void Log(string message)
+    public static void Log(string message, ConsoleColor? color = null)
     {
-        _queue.Enqueue(message);
+        if (string.IsNullOrEmpty(message))
+            return;
+
+        _queue.Enqueue((message, color));
         _signal.Set();
     }
 
@@ -38,9 +41,13 @@ static class AsyncLogger
 
             sb.Clear();
 
-            while (_queue.TryDequeue(out var msg))
+            while (_queue.TryDequeue(out var item))
             {
-                sb.AppendLine(msg);
+                var (msg, color) = item;
+                var prev = Console.ForegroundColor;
+                if (color.HasValue) Console.ForegroundColor = color.Value;
+                Console.Write(msg);
+                Console.ForegroundColor = prev;
             }
 
             if (sb.Length > 0)
