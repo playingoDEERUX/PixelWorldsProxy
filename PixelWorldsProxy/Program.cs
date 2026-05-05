@@ -13,7 +13,7 @@ namespace PixelWorldsProxy
     {
         // for example:
         //public static HashSet<string> msgListDoNotLog = new HashSet<string> { "p", "ST", "mP", "PSicU", "mp", "AIp", "AI" };
-        public static HashSet<string> msgListDoNotLog = new HashSet<string> {};
+        public static HashSet<string> msgListDoNotLog = new HashSet<string> { };
 
         public static BSONObject CreateChatMessage(string nickname, string userID, string channel, int channelIndex, string message)
         {
@@ -62,7 +62,7 @@ namespace PixelWorldsProxy
                             continue;
                     }
 
-                    Console.Write(Indent() + $"  \"{key}\": ");
+                    AsyncLogger.Log(Indent() + $"  \"{key}\": ");
                     LogBSONPacket(obj[key], indent + 1, color, ignoreIDs);
                 }
                 AsyncLogger.Log(Indent() + "}");
@@ -187,7 +187,7 @@ namespace PixelWorldsProxy
                     state.OoIPSync = new TaskCompletionSource<bool>();
                     await state.OoIPSync.Task; // wait until client is ready
 
-                   
+
                 }
             }
             catch (Exception ex)
@@ -196,9 +196,11 @@ namespace PixelWorldsProxy
             }
             finally
             {
-                try { 
+                try
+                {
                     client.Close();
-                } catch { }
+                }
+                catch { }
                 AsyncLogger.Log("Client disconnected");
             }
         }
@@ -310,7 +312,7 @@ namespace PixelWorldsProxy
                                 }
 
                                 await HandleClientPacket(bson, state, to, cancellationToken);
-                                    
+
                                 // Now do same as above but for OutgoingInjectionList:
 
                                 if (state.OutgoingInjectionList.Count > 0)
@@ -362,34 +364,36 @@ namespace PixelWorldsProxy
                 switch (id)
                 {
                     case "OoIP":
-                        string serverIP = msg["IP"];
-                        
-                        if (serverIP != state.LastTargetIP)
                         {
-                            serverIP = await ResolveAsync(serverIP);
-                            pwserverLastIP = serverIP; // we can do this because it turns out any PW endpoint/server will also handle logon for us or send us back to the main one to logon if necessary.
-                            newTargetIP = serverIP;
-                            state.LastTargetIP = serverIP;
-                            AsyncLogger.Log($"[OoIP] Will reconnect to {serverIP}");
+                            string serverIP = msg["IP"];
+
+                            if (serverIP != state.LastTargetIP)
+                            {
+                                serverIP = await ResolveAsync(serverIP);
+                                pwserverLastIP = serverIP; // we can do this because it turns out any PW endpoint/server will also handle logon for us or send us back to the main one to logon if necessary.
+                                newTargetIP = serverIP;
+                                state.LastTargetIP = serverIP;
+                                AsyncLogger.Log($"[OoIP] Will reconnect to {serverIP}");
+                            }
+
+                            msg["IP"] = pwserverDNS;
+                            bOoIPModified = true;
+
+                            var wrapper = new BSONObject();
+                            wrapper["mc"] = 2;
+                            wrapper["m0"] = msg;
+                            wrapper["m1"] = new BSONObject("p");
+
+                            var data = SimpleBSON.Dump(wrapper);
+                            byte[] packet = new byte[data.Length + 4];
+                            Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
+                            Buffer.BlockCopy(data, 0, packet, 4, data.Length);
+                            // Send OoIP to client before reconnecting internall
+                            await SendFull(client, packet, t);
+
+                            return (newTargetIP != null, newTargetIP, bOoIPModified);
                         }
-
-                        msg["IP"] = pwserverDNS;
-                        bOoIPModified = true;
-
-                        var wrapper = new BSONObject();
-                        wrapper["mc"] = 2;
-                        wrapper["m0"] = msg;
-                        wrapper["m1"] = new BSONObject("p");
-
-                        var data = SimpleBSON.Dump(wrapper);
-                        byte[] packet = new byte[data.Length + 4];
-                        Buffer.BlockCopy(BitConverter.GetBytes(packet.Length), 0, packet, 0, 4);
-                        Buffer.BlockCopy(data, 0, packet, 4, data.Length);
-                        // Send OoIP to client before reconnecting internall
-                        await SendFull(client, packet, t);
-
-                        return (newTargetIP != null, newTargetIP, bOoIPModified);
-
+                    
                     default:
                         break;
                 }
@@ -466,9 +470,12 @@ namespace PixelWorldsProxy
 
         public static async Task<string?> ResolveAsync(string hostOrIp)
         {
-    // If it's already an IP, just return it
+            // If it's already an IP, just return it
             if (IPAddress.TryParse(hostOrIp, out var parsed))
                 return parsed.ToString();
+
+            if (hostOrIp == pwserverDNS)
+                return pwserverMainIP;
 
             try
             {
