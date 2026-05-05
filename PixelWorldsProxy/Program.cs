@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -29,87 +30,74 @@ namespace PixelWorldsProxy
 
         static void LogBSONPacket(BSONValue value, int indent = 0, ConsoleColor? color = null, HashSet<string>? ignoreIDs = null)
         {
-            string Indent() => new string(' ', indent * 2);
+            string Indent(int level) => new string(' ', level * 2);
+            var sb = new StringBuilder();
 
-            if (value is BSONObject obj)
+            void AppendValue(BSONValue val, int level)
             {
-                // Count surviving keys after filtering
-                int survivingKeys = obj.Keys.Count(k =>
+                if (val is BSONObject obj)
                 {
-                    if (ignoreIDs != null && k.StartsWith("m") && obj[k] is BSONObject subObj)
+                    // Count surviving keys after filtering
+                    int survivingKeys = obj.Keys.Count(k =>
                     {
-                        if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
-                            return false; // filtered out
-                    }
-                    return true; // keep
-                });
+                        if (ignoreIDs != null && k.StartsWith("m") && obj[k] is BSONObject subObj)
+                        {
+                            if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
+                                return false;
+                        }
+                        return true;
+                    });
 
-                // Skip logging if less than 2 keys survive (usually only "mc" left)
-                if (survivingKeys < 2)
-                    return;
+                    if (survivingKeys < 2)
+                        return;
 
-                var previousColor = Console.ForegroundColor;
-                if (color.HasValue)
-                    Console.ForegroundColor = color.Value;
-
-                AsyncLogger.Log(Indent() + "{");
-                foreach (var key in obj.Keys)
-                {
-                    // Skip filtered "m<n>" entries
-                    if (ignoreIDs != null && key.StartsWith("m") && obj[key] is BSONObject subObj)
+                    sb.AppendLine(Indent(level) + "{");
+                    foreach (var key in obj.Keys)
                     {
-                        if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
-                            continue;
+                        if (ignoreIDs != null && key.StartsWith("m") && obj[key] is BSONObject subObj)
+                        {
+                            if (subObj.TryGetValue("ID", out BSONValue idValue) && ignoreIDs.Contains(idValue.stringValue))
+                                continue;
+                        }
+
+                        sb.Append(Indent(level + 1) + $"\"{key}\": ");
+                        AppendValue(obj[key], level + 1);
                     }
-
-                    AsyncLogger.Log(Indent() + $"  \"{key}\": ");
-                    LogBSONPacket(obj[key], indent + 1, color, ignoreIDs);
+                    sb.AppendLine(Indent(level) + "}");
                 }
-                AsyncLogger.Log(Indent() + "}");
-
-                if (color.HasValue)
-                    Console.ForegroundColor = previousColor;
-            }
-            else if (value is BSONArray arr)
-            {
-                // Arrays are logged unconditionally
-                var previousColor = Console.ForegroundColor;
-                if (color.HasValue)
-                    Console.ForegroundColor = color.Value;
-
-                AsyncLogger.Log(Indent() + "[");
-                for (int i = 0; i < arr.Count; i++)
+                else if (val is BSONArray arr)
                 {
-                    LogBSONPacket(arr[i], indent + 1, color, ignoreIDs);
+                    sb.AppendLine(Indent(level) + "[");
+                    for (int i = 0; i < arr.Count; i++)
+                    {
+                        AppendValue(arr[i], level + 1);
+                    }
+                    sb.AppendLine(Indent(level) + "]");
                 }
-                AsyncLogger.Log(Indent() + "]");
-
-                if (color.HasValue)
-                    Console.ForegroundColor = previousColor;
-            }
-            else
-            {
-                var previousColor = Console.ForegroundColor;
-                if (color.HasValue)
-                    Console.ForegroundColor = color.Value;
-
-                string output = value.valueType switch
+                else
                 {
-                    BSONValue.ValueType.String => $"\"{value.stringValue}\"",
-                    BSONValue.ValueType.Boolean => value.boolValue ? "true" : "false",
-                    BSONValue.ValueType.Int32 => value.int32Value.ToString(),
-                    BSONValue.ValueType.Int64 => value.int64Value.ToString(),
-                    BSONValue.ValueType.Double => value.doubleValue.ToString(),
-                    BSONValue.ValueType.Binary => $"<binary {value.binaryValue.Length} bytes>",
-                    BSONValue.ValueType.UTCDateTime => $"\"{value.dateTimeValue:O}\"",
-                    BSONValue.ValueType.None => "null",
-                    _ => $"\"{value.stringValue}\""
-                };
-                AsyncLogger.Log(Indent() + output + ",");
-
-                if (color.HasValue)
-                    Console.ForegroundColor = previousColor;
+                    string output = val.valueType switch
+                    {
+                        BSONValue.ValueType.String => $"\"{val.stringValue}\"",
+                        BSONValue.ValueType.Boolean => val.boolValue ? "true" : "false",
+                        BSONValue.ValueType.Int32 => val.int32Value.ToString(),
+                        BSONValue.ValueType.Int64 => val.int64Value.ToString(),
+                        BSONValue.ValueType.Double => val.doubleValue.ToString(),
+                        BSONValue.ValueType.Binary => $"<binary {val.binaryValue.Length} bytes>",
+                        BSONValue.ValueType.UTCDateTime => $"\"{val.dateTimeValue:O}\"",
+                        BSONValue.ValueType.None => "null",
+                        _ => $"\"{val.stringValue}\""
+                    };
+                    sb.AppendLine(Indent(level) + output + ",");
+                }
             }
+
+            // Capture previous color
+            
+            AppendValue(value, indent);
+
+            // Single atomic log call
+            AsyncLogger.Log(sb.ToString(), color);
         }
 
         const int BufferSize = 1024;
